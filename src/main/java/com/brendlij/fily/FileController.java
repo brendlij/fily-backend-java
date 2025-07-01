@@ -11,6 +11,8 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.*;
 import java.nio.file.*;
 import java.util.*;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 @RestController
 @RequestMapping("/api/files")
@@ -58,16 +60,53 @@ public class FileController {
 
     // ==================== DOWNLOAD ====================
     @GetMapping("/download")
-    public ResponseEntity<Resource> downloadFile(
-            @RequestParam String path
-    ) throws IOException {
+    public ResponseEntity<Resource> downloadFile(@RequestParam String path) throws IOException {
         File file = safeFile(path);
-        if (!file.exists() || file.isDirectory())
-            return ResponseEntity.status(404).build();
-        Resource resource = new UrlResource(file.toURI());
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
-                .body(resource);
+        if (!file.exists()) return ResponseEntity.status(404).build();
+
+        if (file.isDirectory()) {
+            // Ordner als ZIP komprimieren
+            File zipFile = createZipFromDirectory(file);
+            Resource resource = new UrlResource(zipFile.toURI());
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"" + file.getName() + ".zip\"")
+                    .header(HttpHeaders.CONTENT_TYPE, "application/zip")
+                    .body(resource);
+        } else {
+            // Normale Datei
+            Resource resource = new UrlResource(file.toURI());
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"" + resource.getFilename() + "\"")
+                    .body(resource);
+        }
+    }
+
+    private File createZipFromDirectory(File directory) throws IOException {
+        File zipFile = File.createTempFile(directory.getName(), ".zip");
+        try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipFile))) {
+            zipDirectory(directory, directory.getName(), zos);
+        }
+        return zipFile;
+    }
+
+    private void zipDirectory(File folder, String parentFolder, ZipOutputStream zos) throws IOException {
+        for (File file : folder.listFiles()) {
+            if (file.isDirectory()) {
+                zipDirectory(file, parentFolder + "/" + file.getName(), zos);
+            } else {
+                zos.putNextEntry(new ZipEntry(parentFolder + "/" + file.getName()));
+                try (FileInputStream fis = new FileInputStream(file)) {
+                    byte[] buffer = new byte[1024];
+                    int length;
+                    while ((length = fis.read(buffer)) > 0) {
+                        zos.write(buffer, 0, length);
+                    }
+                }
+                zos.closeEntry();
+            }
+        }
     }
 
     // ==================== ORDNER ANLEGEN ====================
