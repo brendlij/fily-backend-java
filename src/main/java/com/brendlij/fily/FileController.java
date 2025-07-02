@@ -1,13 +1,18 @@
 package com.brendlij.fily;
 
 import com.brendlij.fily.security.JwtUtil;
-import io.jsonwebtoken.*;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.*;
-import org.springframework.http.*;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -18,7 +23,6 @@ import java.util.zip.*;
 
 @RestController
 @RequestMapping("/api/files")
-@CrossOrigin
 public class FileController {
 
     private static final Logger logger = LoggerFactory.getLogger(FileController.class);
@@ -26,27 +30,17 @@ public class FileController {
     @Value("${fileserver.basedir}")
     private String baseDir;
 
-    private final JwtUtil jwtUtil;
-
-    public FileController(JwtUtil jwtUtil) {
-        this.jwtUtil = jwtUtil;
+    // Hilfsmethode: Hole den Benutzernamen aus dem Spring Security Context
+    private String getCurrentUsername() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated() || auth.getName().equals("anonymousUser")) {
+            logger.warn("Nicht authentifiziert!");
+            throw new RuntimeException("Nicht authentifiziert!");
+        }
+        return auth.getName();
     }
 
-    private String getUsernameFromHeader(String authHeader) {
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-            logger.warn("Kein oder ungültiger Authorization Header");
-            throw new RuntimeException("Kein Token");
-        }
-        String token = authHeader.substring(7);
-        String username = jwtUtil.validateTokenAndGetUsername(token);
-        if (username == null) {
-            logger.warn("Ungültiges JWT Token");
-            throw new RuntimeException("Ungültiges Token");
-        }
-        logger.debug("Username aus JWT: {}", username);
-        return username;
-    }
-
+    // Verhindert Directory Traversal und normalisiert Pfad
     private File safeFile(String username, String subPath) {
         if (subPath.contains("..")) {
             logger.warn("Ungültiger Pfad mit '..': {}", subPath);
@@ -61,9 +55,10 @@ public class FileController {
     }
 
     @GetMapping
-    public ResponseEntity<?> listFiles(@RequestHeader("Authorization") String auth, @RequestParam(defaultValue = "") String path) {
+    public ResponseEntity<?> listFiles(@RequestParam(defaultValue = "") String path) {
         try {
-            String username = getUsernameFromHeader(auth);
+            String username = getCurrentUsername();
+            String currentPath = path.isEmpty() ? "" : path;
             File folder = safeFile(username, path);
             if (!folder.exists() || !folder.isDirectory()) {
                 logger.warn("Ordner nicht gefunden für Benutzer {}: {}", username, folder.getAbsolutePath());
@@ -79,6 +74,7 @@ public class FileController {
                     entry.put("isDirectory", file.isDirectory());
                     entry.put("size", file.isFile() ? file.length() : null);
                     entry.put("lastModified", file.lastModified());
+                    entry.put("path", currentPath.isEmpty() ? file.getName() : currentPath + "/" + file.getName());
                     result.add(entry);
                 }
             }
@@ -91,11 +87,11 @@ public class FileController {
     }
 
     @PostMapping("/upload")
-    public ResponseEntity<?> uploadFile(@RequestHeader("Authorization") String auth,
-                                        @RequestParam("file") MultipartFile file,
-                                        @RequestParam(defaultValue = "") String path) {
+    public ResponseEntity<?> uploadFile(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(defaultValue = "") String path) {
         try {
-            String username = getUsernameFromHeader(auth);
+            String username = getCurrentUsername();
             File dir = safeFile(username, path);
             if (!dir.exists()) dir.mkdirs();
             File dest = new File(dir, file.getOriginalFilename());
@@ -109,10 +105,9 @@ public class FileController {
     }
 
     @GetMapping("/download")
-    public ResponseEntity<Resource> downloadFile(@RequestHeader("Authorization") String auth,
-                                                 @RequestParam String path) {
+    public ResponseEntity<Resource> downloadFile(@RequestParam String path) {
         try {
-            String username = getUsernameFromHeader(auth);
+            String username = getCurrentUsername();
             File file = safeFile(username, path);
             if (!file.exists()) {
                 logger.warn("Download: Datei nicht gefunden für Benutzer {}: {}", username, path);
@@ -129,20 +124,68 @@ public class FileController {
             logger.info("Datei-Download für Benutzer {}: {}", username, filename);
 
             return ResponseEntity.ok()
-                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + filename + "\"")
                     .header(HttpHeaders.CONTENT_TYPE, contentType)
                     .body(resource);
+
         } catch (Exception e) {
             logger.error("Fehler beim Download", e);
             return ResponseEntity.status(500).build();
         }
     }
 
-    @PostMapping("/mkdir")
-    public ResponseEntity<?> makeDir(@RequestHeader("Authorization") String auth,
-                                     @RequestParam String path) {
+    @GetMapping("/view")
+    public ResponseEntity<Resource> viewFileInline(@RequestParam String path) {
         try {
-            String username = getUsernameFromHeader(auth);
+            String username = getCurrentUsername();
+            File file = safeFile(username, path);
+
+            if (!file.exists()) {
+                return ResponseEntity.notFound().build();
+            }
+
+            Resource resource = new UrlResource(file.toURI());
+
+            String contentType = Files.probeContentType(file.toPath());
+            if (contentType == null) {
+                String ext = "";
+                int i = file.getName().lastIndexOf('.');
+                if (i > 0) {
+                    ext = file.getName().substring(i + 1).toLowerCase();
+                }
+                switch (ext) {
+                    case "pdf": contentType = "application/pdf"; break;
+                    case "png": contentType = "image/png"; break;
+                    case "jpg":
+                    case "jpeg": contentType = "image/jpeg"; break;
+                    case "gif": contentType = "image/gif"; break;
+                    case "bmp": contentType = "image/bmp"; break;
+                    case "svg": contentType = "image/svg+xml"; break;
+                    case "txt": contentType = "text/plain"; break;
+                    case "json": contentType = "application/json"; break;
+                    case "csv": contentType = "text/csv"; break;
+                    case "html":
+                    case "htm": contentType = "text/html"; break;
+                    case "md": contentType = "text/markdown"; break;
+                    default: contentType = "application/octet-stream"; break;
+                }
+            }
+
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + file.getName() + "\"")
+                    .header(HttpHeaders.CONTENT_TYPE, contentType)
+                    .body(resource);
+
+        } catch (Exception e) {
+            logger.error("Fehler bei Datei-View", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    @PostMapping("/mkdir")
+    public ResponseEntity<?> makeDir(@RequestParam String path) {
+        try {
+            String username = getCurrentUsername();
             File dir = safeFile(username, path);
             if (dir.exists()) {
                 logger.warn("Verzeichnis existiert bereits für Benutzer {}: {}", username, path);
@@ -163,10 +206,9 @@ public class FileController {
     }
 
     @DeleteMapping
-    public ResponseEntity<?> deleteFileOrDir(@RequestHeader("Authorization") String auth,
-                                             @RequestParam String path) {
+    public ResponseEntity<?> deleteFileOrDir(@RequestParam String path) {
         try {
-            String username = getUsernameFromHeader(auth);
+            String username = getCurrentUsername();
             File file = safeFile(username, path);
             if (!file.exists()) {
                 logger.warn("Löschen: Datei/Ordner nicht gefunden für Benutzer {}: {}", username, path);
@@ -187,11 +229,9 @@ public class FileController {
     }
 
     @PostMapping("/rename")
-    public ResponseEntity<?> rename(@RequestHeader("Authorization") String auth,
-                                    @RequestParam String oldPath,
-                                    @RequestParam String newName) {
+    public ResponseEntity<?> rename(@RequestParam String oldPath, @RequestParam String newName) {
         try {
-            String username = getUsernameFromHeader(auth);
+            String username = getCurrentUsername();
             File oldFile = safeFile(username, oldPath);
             if (!oldFile.exists()) {
                 logger.warn("Umbenennen: Datei nicht gefunden für Benutzer {}: {}", username, oldPath);
@@ -215,6 +255,8 @@ public class FileController {
             return ResponseEntity.status(500).body("Interner Serverfehler");
         }
     }
+
+    // --- Hilfsfunktionen ---
 
     private boolean deleteDirRecursive(File dir) {
         File[] allContents = dir.listFiles();
