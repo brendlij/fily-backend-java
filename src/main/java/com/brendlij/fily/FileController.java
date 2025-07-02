@@ -167,6 +167,9 @@ public class FileController {
                     case "html":
                     case "htm": contentType = "text/html"; break;
                     case "md": contentType = "text/markdown"; break;
+                    case "mp4": contentType = "video/mp4"; break;
+                    case "avi": contentType = "video/x-msvideo"; break;
+                    case "mov": contentType = "video/quicktime"; break;
                     default: contentType = "application/octet-stream"; break;
                 }
             }
