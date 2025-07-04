@@ -25,6 +25,18 @@ import java.util.zip.*;
 @RequestMapping("/api/files")
 public class FileController {
 
+    // DTO für die Anfrage
+    public static class MoveFileRequest {
+        private String source;
+        private String target;
+        // Getter & Setter
+        public String getSource() { return source; }
+        public void setSource(String source) { this.source = source; }
+        public String getTarget() { return target; }
+        public void setTarget(String target) { this.target = target; }
+    }
+
+
     private static final Logger logger = LoggerFactory.getLogger(FileController.class);
 
     @Value("${fileserver.basedir}")
@@ -258,6 +270,49 @@ public class FileController {
             return ResponseEntity.status(500).body("Interner Serverfehler");
         }
     }
+
+    // Move-Endpoint (einfach zu FileController hinzufügen)
+    @PostMapping("/move")
+    public ResponseEntity<?> moveFile(@RequestBody MoveFileRequest request) {
+        try {
+            String username = getCurrentUsername();
+
+            // Source und Target (beide relativ zum User-Ordner!)
+            File sourceFile = safeFile(username, request.getSource());
+            File targetFile = safeFile(username, request.getTarget());
+
+            // Existiert die Quelldatei?
+            if (!sourceFile.exists()) {
+                return ResponseEntity.status(404)
+                        .body(Collections.singletonMap("error", "Quelle nicht gefunden!"));
+            }
+
+            // Zielverzeichnis anlegen, falls nötig
+            File targetDir = targetFile.getParentFile();
+            if (!targetDir.exists()) {
+                if (!targetDir.mkdirs()) {
+                    return ResponseEntity.status(500)
+                            .body(Collections.singletonMap("error", "Zielordner konnte nicht erstellt werden!"));
+                }
+            }
+
+            // Verschieben!
+            boolean ok = sourceFile.renameTo(targetFile);
+            if (ok) {
+                logger.info("Datei/Ordner verschoben von {} nach {} für {}", sourceFile, targetFile, username);
+                return ResponseEntity.ok(Collections.singletonMap("message", "Verschoben!"));
+            } else {
+                logger.error("Verschieben fehlgeschlagen: {} -> {} für {}", sourceFile, targetFile, username);
+                return ResponseEntity.status(500)
+                        .body(Collections.singletonMap("error", "Verschieben fehlgeschlagen!"));
+            }
+        } catch (Exception e) {
+            logger.error("Fehler beim Verschieben", e);
+            return ResponseEntity.status(500)
+                    .body(Collections.singletonMap("error", "Interner Fehler beim Verschieben!"));
+        }
+    }
+
 
     // --- Hilfsfunktionen ---
 
